@@ -15,5 +15,21 @@ object ImplicitHang {
 
   implicit def i2s(i: Int): String = i
 
-  def hang: String = 1 // Kill everything
+  def oneAsString: String = 1 // hangs
+
+  /* At the same time, preventing that behaviour would prevent 
+   * people from doing this (rather contrived) example */
+
+  sealed trait Nat
+  case object Zero extends Nat
+  case class Succ(n: Nat) extends Nat
+
+  implicit def nat2Int(n : Nat): Int = n match {
+    case Zero => 0
+    case Succ(t) => t + 1
+  }
+
+  /* Does not hang */
+  def four: Int = Succ(Succ(Succ(Succ(Zero)))) 
+
 }
