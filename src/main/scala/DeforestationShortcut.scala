@@ -68,8 +68,18 @@ trait CommonEval extends Common {
 /* Common expression trait shared by all traits that create Expressions */
 trait CommonExpr extends Common {
 
+  private var numSymbols = 0
+
+  def freshSymbol(): Symbol = {
+    val curSym = s"x$numSymbols"
+    numSymbols += 1
+    Symbol(curSym)
+  }
+
   abstract class ProxyTyp[T] {
     type ScalaT
+
+    def manifest: Manifest[ScalaT]
 
     def proof: ScalaT CanBe T
 
@@ -78,8 +88,10 @@ trait CommonExpr extends Common {
     def extract(x: T): Expr[ScalaT]
   }
 
-  def getProxy[S, T](pr: Expr[S] => T, ex: T => Expr[S])(implicit mTE: S CanBe T) = new ProxyTyp[T] {
+  def getProxy[S: Manifest, T](pr: Expr[S] => T, ex: T => Expr[S])(implicit mTE: S CanBe T) = new ProxyTyp[T] {
     type ScalaT = S
+
+    def manifest = implicitly[Manifest[S]]
 
     def proof = mTE
 
@@ -107,22 +119,37 @@ trait CommonExpr extends Common {
   }
 
   // Identifiers
-  case class Id[I](s: Symbol)
+  case class Id[I](s: Symbol) extends Expr[I] {
+    override def toString = s.toString
+
+    def eval() = sys.error(s"Cannot evaluate free var $s")
+  }
 
 
-  type Subst = Expr[Any] => Expr[Any]
-  def transform[T](subst: Subst)(expr : Expr[T]): Expr[T] = {
+  type Subst = Map[Expr[Any], Expr[Any]]
+
+  def transform[T](subst: Subst)(expr: Expr[T]): Expr[T] = {
     sys.error("Don't know how to transform")
   }
 
   // Lambda
-  case class Lambda[I, T](x: Id[I], expr: Expr[T]) extends Expr[I => T] {
-    def eval() = ???
+  case class Lambda[I: Manifest, T](x: Id[I], expr: Expr[T]) extends Expr[I => T] {
+
+    val symbolType = implicitly[Manifest[I]]
+    override def toString = s"($x: $symbolType) => $expr"
+
+    def eval(): I => T = {
+      (i: I) =>
+        transform(Map(x -> Constant(i)))(expr).eval()
+    }
   }
 
-  //implicit def liftConstants[T](x: T): Expr[T] = Constant(x)
-
-  implicit def liftSymbols[T](s: Symbol): Id[T] = Id[T](s)
+  implicit def liftFunction[A, B](f: A => B)(implicit typA: Typ[A], typB: Typ[B]): Lambda[typA.ScalaT, typB.ScalaT] = {
+    val s = Id[typA.ScalaT](freshSymbol())
+    val block = typB.extract(f(typA.proxy(s)))
+    implicit val manifest = typA.manifest
+    Lambda(s, block)
+  }
 
 }
 
@@ -319,10 +346,6 @@ trait NumericProxies {
   }
 }
 
-trait ExprFunction extends CommonExpr {
-  def lift[A, B](t : Expr[A] => Expr[B])
-}
-
 trait AbstractWorld extends AbstractBoolean with AbstractIf with AbstractInt with NumericProxies {
   outer =>
 
@@ -503,15 +526,39 @@ object ExprWorld extends AbstractWorld
     vTyp.extract(v).toString
   }
 
+  override def transform[T](subst: Subst)(expr: Expr[T]): Expr[T] = {
+    subst.getOrElse(expr, {
+      expr match {
+        case IfNode(c, t, e) => IfNode(transform(subst)(c), transform(subst)(t), transform(subst)(e))
+        case IntPlus(a, b) => IntPlus(transform(subst)(a), transform(subst)(b))
+        case BoolOr(a, b) => BoolOr(transform(subst)(a), transform(subst)(b))
+        case BoolAnd(a, b) => BoolAnd(transform(subst)(a), transform(subst)(b))
+        case Constant(x) => Constant(x)
+        case _ => sys.error(s"Dont know how to transform : $expr")
+      }
+    }).asInstanceOf[Expr[T]] // can we do without ?
+  }
 
-  def intValue = _1 + 2 + 3
 
-  def booleanValue = (_true && false) || true
+  val intValue = _1 + 2 + 3
 
-  def ifThenElse = _if_then_else(booleanValue)(intValue)(intValue + 14)
+  val booleanValue = (_true && false) || true
+
+  val ifThenElse = _if_then_else(booleanValue)(intValue)(intValue + 14)
+
+  val function = (x: Int) => x + ifThenElse
+
+  val liftedFunction = liftFunction(function)
 
   println(stringProxy(ifThenElse))
   println(s"Result of the evaluation : ${evalProxy(ifThenElse)}")
+  println(function)
+  println(liftedFunction)
+  val argument = liftedFunction.symbolType.unapply(45).get // TODO: I don't want to have to do that
+  val evaluatedFunction= liftedFunction.eval()
+  println(argument)
+  println(evaluatedFunction)
+  println(s"Evaluation of lifted funciton : ${evaluatedFunction.apply(argument)}")
 }
 
 object Main {
