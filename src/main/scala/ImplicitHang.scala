@@ -4,7 +4,7 @@ object ImplicitHang {
 
   /* Despite having no explicit recursion, nor loops, this
    * piece of code will hang as the compiler will try to 
-   * apply the implicit conversion to type check it's own body.
+   * apply the implicit conversion to type check its own body.
    *
    * This effectifely gets transformed to:
    * implicit def i2s(i: Int): String = i2s(i)
