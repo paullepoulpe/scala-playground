@@ -67,19 +67,24 @@ trait CommonExpr extends Common {
 
   abstract class ProxyTyp[T] {
     type ScalaT
-    implicit def proof : ScalaT CanBe T
+
+    def proof: ScalaT CanBe T
+
     def proxy(e: Expr[ScalaT]): T
+
     def extract(x: T): Expr[ScalaT]
   }
 
   def getProxy[S, T](pr: Expr[S] => T, ex: T => Expr[S])(implicit mTE: S CanBe T) = new ProxyTyp[T] {
     type ScalaT = S
+
     def proof = mTE
+
     def proxy(e: Expr[ScalaT]): T = pr(e)
+
     def extract(x: T): Expr[ScalaT] = ex(x)
   }
 
-  // TODO: is this really what we want ?
   type Typ[T] = ProxyTyp[T]
 
   // expressions with type T
@@ -141,7 +146,7 @@ trait EvaluationBoolean extends CommonEval with AbstractBoolean {
   type Boolean = EvaluationBooleanProxy
 }
 
-trait ExprBoolean extends AbstractBoolean with CommonExpr {
+trait ExprBoolean extends CommonExpr with AbstractBoolean {
 
   implicit val boolProof = fromFunction((x: scala.Boolean) => ExprBoolProxy(Constant(x)))
   implicit val boolTyp: Typ[Boolean] = getProxy[scala.Boolean, Boolean](ExprBoolProxy, _.e)
@@ -167,7 +172,8 @@ trait ExprBoolean extends AbstractBoolean with CommonExpr {
   }
 }
 
-trait AbstractIf extends Common with AbstractBoolean {
+trait AbstractIf extends Common {
+  self: AbstractBoolean =>
 
   // TODO: Make this ressemble more the scala version of if then else (without scala-virtualized)
   def _if_then_else[TB, EB, RES: Typ](cond: Boolean)(thenBlock: => TB)(elseBlock: => EB)
@@ -175,23 +181,25 @@ trait AbstractIf extends Common with AbstractBoolean {
 
 }
 
-trait EvaluationIf extends CommonEval with AbstractIf with EvaluationBoolean {
+trait EvaluationIf extends CommonEval with AbstractIf {
+  self: EvaluationBoolean =>
   def _if_then_else[TB, EB, RES: Typ](cond: Boolean)(thenBlock: => TB)(elseBlock: => EB)
                                      (implicit t2r: TB CanBe RES, e2r: EB CanBe RES): RES =
     if (cond.b) t2r(thenBlock) else e2r(elseBlock)
 }
 
-trait ExprIf extends AbstractIf with ExprBoolean with CommonExpr {
+trait ExprIf extends CommonExpr with AbstractIf {
+  self: ExprBoolean =>
 
   case class IfNode[T](cond: Boolean, thenBlock: Expr[T], elseBlock: Expr[T]) extends Expr[T]
 
   def _if_then_else[TB, EB, RES: Typ](cond: Boolean)(thenBlock: => TB)(elseBlock: => EB)
                                      (implicit t2r: TB CanBe RES, e2r: EB CanBe RES): RES = {
 
-    val proxyTyp : ProxyTyp[RES] = implicitly[Typ[RES]]
-    val thenExpr : Expr[proxyTyp.ScalaT] = proxyTyp.extract(t2r(thenBlock))
-    val elseExpr : Expr[proxyTyp.ScalaT]= proxyTyp.extract(e2r(elseBlock))
-    val node : Expr[proxyTyp.ScalaT] = IfNode(cond, thenExpr, elseExpr)
+    val proxyTyp: ProxyTyp[RES] = implicitly[Typ[RES]]
+    val thenExpr: Expr[proxyTyp.ScalaT] = proxyTyp.extract(t2r(thenBlock))
+    val elseExpr: Expr[proxyTyp.ScalaT] = proxyTyp.extract(e2r(elseBlock))
+    val node: Expr[proxyTyp.ScalaT] = IfNode(cond, thenExpr, elseExpr)
     proxyTyp.proxy(node)
   }
 }
@@ -240,7 +248,7 @@ trait EvaluationInt extends CommonEval with AbstractInt {
   implicit def lift(b: scala.Int): Int = new EvaluationIntProxy(b)
 }
 
-trait ExprInt extends AbstractInt with CommonExpr {
+trait ExprInt extends CommonExpr with AbstractInt {
   implicit val intProof = fromFunction((x: scala.Int) => ExprIntProxy(Constant(x)))
   implicit val intTyp: Typ[Int] = getProxy[scala.Int, Int](ExprIntProxy, _.e)
 
@@ -258,8 +266,8 @@ trait ExprInt extends AbstractInt with CommonExpr {
   }
 }
 
-trait NumericProxies extends AbstractInt {
-  outer =>
+trait NumericProxies {
+  self: AbstractInt =>
 
   implicit val intNumericProxy: Numeric[Int] = new Numeric[Int] {
     def compare(x: Int, y: Int): scala.Int = ???
@@ -284,8 +292,12 @@ trait NumericProxies extends AbstractInt {
   }
 }
 
-trait AbstractWorld extends AbstractBoolean with AbstractIf with AbstractInt with NumericProxies {
+trait AbstractWorld {
   outer =>
+
+  val IR: AbstractBoolean with AbstractIf with AbstractInt with NumericProxies
+
+  import IR._
 
   type L[T] // type B in the paper TODO: see if this is actually needed (too restrictive ?)
 
@@ -377,7 +389,12 @@ trait AbstractWorld extends AbstractBoolean with AbstractIf with AbstractInt wit
 
 }
 
-object EvaluationWorld extends CommonEval with AbstractWorld with EvaluationBoolean with EvaluationIf with EvaluationInt {
+object EvaluationWorld extends AbstractWorld {
+
+  val IR = new CommonEval with EvaluationBoolean with EvaluationIf with EvaluationInt with NumericProxies {}
+
+  import IR._
+
 
   type L[T] = MyList[T]
 
@@ -432,7 +449,11 @@ object EvaluationWorld extends CommonEval with AbstractWorld with EvaluationBool
 
 }
 
-object ExprWorld extends AbstractWorld with CommonExpr with ExprBoolean with ExprIf with ExprInt {
+object ExprWorld extends AbstractWorld {
+
+  val IR = new CommonExpr with ExprBoolean with ExprIf with ExprInt with NumericProxies {}
+
+  import IR._
 
   type L[T] = MyList[T]
 
