@@ -7,7 +7,7 @@
 
 // Get all of the good stuff
 import scala.language._
-
+import scala.annotation.implicitNotFound
 
 /* Simple lists with no methods */
 sealed trait MyList[+T] {
@@ -21,21 +21,24 @@ object MyList {
 }
 
 case object MyNil extends MyList[Nothing] {
-  override def toString = "()"
+  override def toString = "L()"
 
   def toList = Nil
 }
 
 
 case class MyCons[T](x: T, xs: MyList[T]) extends MyList[T] {
-  override def toString = toList.mkString("(", ",", ")")
+  override def toString = toList.mkString("L(", ",", ")")
 
   def toList = x :: xs.toList
 }
 
 trait Common {
+
+  @implicitNotFound("${T} is not a DSL type")
   type Typ[T]
 
+  @implicitNotFound("${A} cannot be viewed as ${B}")
   trait CanBe[A, B] {
     def apply(a: A): B
   }
@@ -88,34 +91,44 @@ trait CommonExpr extends Common {
   type Typ[T] = ProxyTyp[T]
 
   // expressions with type T
-  abstract class Expr[+T]
+  abstract class Expr[+T] {
+    def toString: String
+
+    def eval(): T
+  }
 
   // extends Dynamic ?
 
   // Constants
-  case class Constant[+T](x: T) extends Expr[T]
+  case class Constant[+T](x: T) extends Expr[T] {
+    override def toString = x.toString
+
+    def eval() = x
+  }
 
   // Identifiers
   case class Id[I](s: Symbol)
 
+
+  type Subst = Expr[Any] => Expr[Any]
+  def transform[T](subst: Subst)(expr : Expr[T]): Expr[T] = {
+    sys.error("Don't know how to transform")
+  }
+
   // Lambda
-  case class Lambda[I, T](x: Id[I], expr: Expr[T])
+  case class Lambda[I, T](x: Id[I], expr: Expr[T]) extends Expr[I => T] {
+    def eval() = ???
+  }
 
   //implicit def liftConstants[T](x: T): Expr[T] = Constant(x)
 
   implicit def liftSymbols[T](s: Symbol): Id[T] = Id[T](s)
 
-  def string(e: Expr[_]): String = e match {
-    case Constant(x) => "_" + x.toString
-    case _ =>
-      sys.error("Don't know how to call toString on : " + e)
-  }
-
 }
 
 trait AbstractBoolean extends Common {
 
-  implicit val boolProof: scala.Boolean CanBe Boolean
+  implicit def boolProof: scala.Boolean CanBe Boolean
 
   // TODO: Why do I have to make this explicit ???
   implicit def boolLift(b: scala.Boolean): Boolean = lift(b)(boolProof)
@@ -130,17 +143,20 @@ trait AbstractBoolean extends Common {
 
   // Literals
   val _true: Boolean = true
-  val _false: Boolean = true
+  val _false: Boolean = false
 }
 
 trait EvaluationBoolean extends CommonEval with AbstractBoolean {
 
-  val boolProof = fromFunction(EvaluationBooleanProxy)
+  // This stuff causes an initialization error without lazy
+  lazy val boolProof = fromFunction(EvaluationBooleanProxy)
 
   case class EvaluationBooleanProxy(b: scala.Boolean) extends BooleanProxy {
     def &&(that: Boolean): Boolean = b && that.b
 
-    def ||(that: Boolean): Boolean = b && that.b
+    def ||(that: Boolean): Boolean = b || that.b
+
+    override def toString = b.toString
   }
 
   type Boolean = EvaluationBooleanProxy
@@ -148,13 +164,22 @@ trait EvaluationBoolean extends CommonEval with AbstractBoolean {
 
 trait ExprBoolean extends CommonExpr with AbstractBoolean {
 
-  implicit val boolProof = fromFunction((x: scala.Boolean) => ExprBoolProxy(Constant(x)))
+  implicit lazy val boolProof = fromFunction((x: scala.Boolean) => ExprBoolProxy(Constant(x)))
   implicit val boolTyp: Typ[Boolean] = getProxy[scala.Boolean, Boolean](ExprBoolProxy, _.e)
 
 
-  case class BoolAnd(a: Expr[scala.Boolean], b: Expr[scala.Boolean]) extends Expr[scala.Boolean]
+  case class BoolAnd(a: Expr[scala.Boolean], b: Expr[scala.Boolean]) extends Expr[scala.Boolean] {
+    override def toString = "(" + a.toString + " && " + b.toString + ")"
 
-  case class BoolOr(a: Expr[scala.Boolean], b: Expr[scala.Boolean]) extends Expr[scala.Boolean]
+    def eval() = a.eval && b.eval()
+  }
+
+  case class BoolOr(a: Expr[scala.Boolean], b: Expr[scala.Boolean]) extends Expr[scala.Boolean] {
+    override def toString = "(" + a.toString + " || " + b.toString + ")"
+
+    def eval() = a.eval || b.eval()
+
+  }
 
   case class ExprBoolProxy(e: Expr[scala.Boolean]) extends BooleanProxy {
     def &&(other: Boolean) = ExprBoolProxy(BoolAnd(e, other.e))
@@ -163,51 +188,52 @@ trait ExprBoolean extends CommonExpr with AbstractBoolean {
   }
 
   type Boolean = ExprBoolProxy
-
-
-  override def string(e: Expr[_]): String = e match {
-    case BoolAnd(x, y) => string(x) + " && " + string(y)
-    case BoolOr(x, y) => string(x) + " || " + string(y)
-    case _ => super.string(e)
-  }
 }
 
 trait AbstractIf extends Common {
   self: AbstractBoolean =>
 
   // TODO: Make this ressemble more the scala version of if then else (without scala-virtualized)
-  def _if_then_else[TB, EB, RES: Typ](cond: Boolean)(thenBlock: => TB)(elseBlock: => EB)
-                                     (implicit t2r: TB CanBe RES, e2r: EB CanBe RES): RES
+  def _if_then_else[TB, EB, RES](cond: Boolean)(thenBlock: => TB)(elseBlock: => EB)
+                                (implicit t2r: TB CanBe RES, e2r: EB CanBe RES, resTyp: Typ[RES]): RES
 
 }
 
 trait EvaluationIf extends CommonEval with AbstractIf {
   self: EvaluationBoolean =>
-  def _if_then_else[TB, EB, RES: Typ](cond: Boolean)(thenBlock: => TB)(elseBlock: => EB)
-                                     (implicit t2r: TB CanBe RES, e2r: EB CanBe RES): RES =
+  def _if_then_else[TB, EB, RES](cond: Boolean)(thenBlock: => TB)(elseBlock: => EB)
+                                (implicit t2r: TB CanBe RES, e2r: EB CanBe RES, resTyp: Typ[RES]): RES =
     if (cond.b) t2r(thenBlock) else e2r(elseBlock)
 }
 
 trait ExprIf extends CommonExpr with AbstractIf {
   self: ExprBoolean =>
 
-  case class IfNode[T](cond: Boolean, thenBlock: Expr[T], elseBlock: Expr[T]) extends Expr[T]
+  case class IfNode[T](cond: Expr[scala.Boolean], thenBlock: Expr[T], elseBlock: Expr[T]) extends Expr[T] {
+    override def toString =
+      s"""if($cond){
+          |  $thenBlock
+          |} else {
+          |  $elseBlock
+          |}""".stripMargin
 
-  def _if_then_else[TB, EB, RES: Typ](cond: Boolean)(thenBlock: => TB)(elseBlock: => EB)
-                                     (implicit t2r: TB CanBe RES, e2r: EB CanBe RES): RES = {
+    def eval() = if (cond.eval()) thenBlock.eval() else elseBlock.eval()
+  }
 
-    val proxyTyp: ProxyTyp[RES] = implicitly[Typ[RES]]
-    val thenExpr: Expr[proxyTyp.ScalaT] = proxyTyp.extract(t2r(thenBlock))
-    val elseExpr: Expr[proxyTyp.ScalaT] = proxyTyp.extract(e2r(elseBlock))
-    val node: Expr[proxyTyp.ScalaT] = IfNode(cond, thenExpr, elseExpr)
-    proxyTyp.proxy(node)
+  def _if_then_else[TB, EB, RES](cond: Boolean)(thenBlock: => TB)(elseBlock: => EB)
+                                (implicit t2r: TB CanBe RES, e2r: EB CanBe RES, resTyp: Typ[RES]): RES = {
+
+    val thenExpr: Expr[resTyp.ScalaT] = resTyp.extract(t2r(thenBlock))
+    val elseExpr: Expr[resTyp.ScalaT] = resTyp.extract(e2r(elseBlock))
+    val node: Expr[resTyp.ScalaT] = IfNode(cond.e, thenExpr, elseExpr)
+    resTyp.proxy(node)
   }
 }
 
 trait AbstractInt extends Common {
 
 
-  implicit val intProof: scala.Int CanBe Int
+  implicit def intProof: scala.Int CanBe Int
 
   implicit def intLift(b: scala.Int): Int = lift(b)(intProof)
 
@@ -235,35 +261,36 @@ trait AbstractInt extends Common {
 trait EvaluationInt extends CommonEval with AbstractInt {
 
 
-  val intProof = fromFunction(EvaluationIntProxy)
+  lazy val intProof = fromFunction(EvaluationIntProxy)
 
   case class EvaluationIntProxy(i: scala.Int) extends IntProxy {
     def +(other: Int) = i + other.i
 
     def ==(other: Int) = lift(i == other.i)
+
+    override def toString = i.toString
+
   }
 
   type Int = EvaluationIntProxy
 
-  implicit def lift(b: scala.Int): Int = new EvaluationIntProxy(b)
 }
 
 trait ExprInt extends CommonExpr with AbstractInt {
-  implicit val intProof = fromFunction((x: scala.Int) => ExprIntProxy(Constant(x)))
+  implicit lazy val intProof = fromFunction((x: scala.Int) => ExprIntProxy(Constant(x)))
   implicit val intTyp: Typ[Int] = getProxy[scala.Int, Int](ExprIntProxy, _.e)
 
-  case class IntPlus(a: Expr[scala.Int], b: Expr[scala.Int]) extends Expr[scala.Int]
+  case class IntPlus(a: Expr[scala.Int], b: Expr[scala.Int]) extends Expr[scala.Int] {
+    override def toString = "(" + a.toString + " + " + b.toString + ")"
+
+    def eval() = a.eval() + b.eval()
+  }
 
   case class ExprIntProxy(e: Expr[scala.Int]) extends IntProxy {
     def +(other: Int) = ExprIntProxy(IntPlus(e, other.e))
   }
 
   type Int = ExprIntProxy
-
-  override def string(e: Expr[_]): String = e match {
-    case IntPlus(x, y) => string(x) + " + " + string(y)
-    case _ => super.string(e)
-  }
 }
 
 trait NumericProxies {
@@ -292,12 +319,13 @@ trait NumericProxies {
   }
 }
 
-trait AbstractWorld {
+trait ExprFunction extends CommonExpr {
+  def lift[A, B](t : Expr[A] => Expr[B])
+}
+
+trait AbstractWorld extends AbstractBoolean with AbstractIf with AbstractInt with NumericProxies {
   outer =>
 
-  val IR: AbstractBoolean with AbstractIf with AbstractInt with NumericProxies
-
-  import IR._
 
   type L[T] // type B in the paper TODO: see if this is actually needed (too restrictive ?)
 
@@ -316,9 +344,7 @@ trait AbstractWorld {
     foldr(tc.plus)(tc.zero)(xs)
   }
 
-  def elem[A](x: A)(xs: L[A]): Boolean = foldr[A, Boolean] {
-    (a, b) => lift(a == x) || b
-  }(_false)(xs)
+  def elem[A](x: A)(xs: L[A]): Boolean = foldr[A, Boolean](_ == x || _)(_false)(xs)
 
   //def map[A, B](f: A => B)(xs: L[A]): L[B] = foldr[A, L[B]](f(_) :: _)(Nil)(xs)
   def map[A, B](f: A => B)(xs: L[A]): L[B] = build[B] { (cons, nil) =>
@@ -389,16 +415,12 @@ trait AbstractWorld {
 
 }
 
-object EvaluationWorld extends AbstractWorld {
-
-  val IR = new CommonEval with EvaluationBoolean with EvaluationIf with EvaluationInt with NumericProxies {}
-
-  import IR._
-
+object EvaluationWorld extends AbstractWorld
+  with CommonEval with EvaluationBoolean with EvaluationIf with EvaluationInt with NumericProxies {
 
   type L[T] = MyList[T]
 
-  implicit def LTpe[T]: Typ[L[T]] = implicitly[Manifest[MyList[T]]]
+  def LTpe[T]: Typ[L[T]] = Manifest.classType(MyList.getClass)
 
   def foldr[A, B](k: (A, B) => B)(z: B)(xs: L[A]): B = xs match {
     case MyNil => z
@@ -449,41 +471,52 @@ object EvaluationWorld extends AbstractWorld {
 
 }
 
-object ExprWorld extends AbstractWorld {
-
-  val IR = new CommonExpr with ExprBoolean with ExprIf with ExprInt with NumericProxies {}
-
-  import IR._
+object ExprWorld extends AbstractWorld
+  with CommonExpr with ExprBoolean with ExprIf with ExprInt with NumericProxies {
 
   type L[T] = MyList[T]
 
-  implicit def LTpe[T]: Typ[L[T]] = ???
+  def LTpe[T]: Typ[L[T]] = ???
 
-  case class FoldR[A, B: Manifest](k: (A, B) => B, z: B, xs: L[A]) extends Expr[B]
+  case class FoldR[A, B: Manifest](k: (A, B) => B, z: B, xs: L[A]) extends Expr[B] {
+    def eval() = ???
+  }
 
-  case class Build[A: Manifest](g: ((A, L[A]) => L[A], L[A]) => L[A]) extends Expr[L[A]]
+  case class Build[A: Manifest](g: ((A, L[A]) => L[A], L[A]) => L[A]) extends Expr[L[A]] {
+    def eval() = ???
+  }
 
-  def foldr[A, B: Manifest](k: (A, B) => B)(z: B)(xs: L[A]): B = eval(FoldR(k, z, xs))
+  def foldr[A, B: Manifest](k: (A, B) => B)(z: B)(xs: L[A]): B = ??? // FoldR(k, z, xs))
 
-  def build[A: Manifest](g: ((A, L[A]) => L[A], L[A]) => L[A]): L[A] = eval(Build(g))
+  def build[A: Manifest](g: ((A, L[A]) => L[A], L[A]) => L[A]): L[A] = ??? // eval(Build(g))
 
   def foldr[A, B](k: (A, B) => B)(z: B)(xs: L[A]): B = ???
 
   def build[A](g: ((A, L[A]) => L[A], L[A]) => L[A]): L[A] = ???
 
-  def eval[T: Manifest](expr: Expr[T]): T = {
-    val res: T = expr match {
-      case FoldR(k, z, xs) => ??? //xs.toList.foldRight(z)(k)
-      case Build(g) => g((a, b) => MyCons(a, b), MyNil)
-      case IntPlus(a, b) => eval(a) + eval(b)
-      case Constant(e) => e
-      case _ =>
-        println(s"Don't know how to evaluate : $expr")
-        ???
-    }
-    val manifest = implicitly[Manifest[T]]
-    println("eval[" + manifest.toString + "](" + string(expr) + ") = " + res.toString)
-    res
+  def evalProxy[T](expr: T)(implicit typ: Typ[T]): typ.ScalaT = {
+    typ.extract(expr).eval()
   }
 
+  def stringProxy[T: Typ](v: T): String = {
+    val vTyp = implicitly[Typ[T]]
+    vTyp.extract(v).toString
+  }
+
+
+  def intValue = _1 + 2 + 3
+
+  def booleanValue = (_true && false) || true
+
+  def ifThenElse = _if_then_else(booleanValue)(intValue)(intValue + 14)
+
+  println(stringProxy(ifThenElse))
+  println(s"Result of the evaluation : ${evalProxy(ifThenElse)}")
+}
+
+object Main {
+  def main(args: Array[String]): Unit = {
+    val eval = EvaluationWorld
+    val expr = ExprWorld
+  }
 }
