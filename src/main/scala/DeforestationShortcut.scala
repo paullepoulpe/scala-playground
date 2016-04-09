@@ -46,23 +46,26 @@ trait Common {
   // Can't write this cause the compiler gets confused with implicit resolution
   //type CanBe[A, B] = A => B
 
-  implicit def identLift[T: Typ]: T CanBe T = new CanBe[T, T] {
-    def apply(x: T) = x
-  }
-
-  implicit def subtypeLift[A, B >: A]: A CanBe B = new CanBe[A, B] {
-    def apply(x: A) = x
-  }
-
   def fromFunction[A, B](f: A => B) = new CanBe[A, B] {
     def apply(x: A) = f(x)
+  }
+
+  implicit def identLift[T: Typ]: T CanBe T = new CanBe[T, T] {
+    def apply(x: T) = x
   }
 
   implicit def lift[T, U](x: T)(implicit e: T CanBe U): U = e(x)
 }
 
 trait CommonEval extends Common {
-  type Typ[T] = Manifest[T]
+
+  case class Typ[T](name: String)
+
+  def typ[T: Manifest] = Typ[T](manifest[T].toString)
+
+  implicit def nothingCanBeAnything[T]: Nothing CanBe T = fromFunction[Nothing, T]((x: Nothing) => x)
+
+  implicit val NothingTyp = Typ("Nothing")
 }
 
 /* Common expression trait shared by all traits that create Expressions */
@@ -79,28 +82,33 @@ trait CommonExpr extends Common {
   abstract class ProxyTyp[T] {
     type ScalaT
 
-    def manifest: Manifest[ScalaT]
+    def stringRep: String
 
     def proof: ScalaT CanBe T
 
     def proxy(e: Expr[ScalaT]): T
 
     def extract(x: T): Expr[ScalaT]
+
+    override def toString = stringRep
   }
 
-  def getProxy[S: Manifest, T](pr: Expr[S] => T, ex: T => Expr[S])(implicit mTE: S CanBe T) = new ProxyTyp[T] {
+  def getProxy[S, T](name: String, pr: Expr[S] => T, ex: T => Expr[S])(implicit mTE: S CanBe T) = new ProxyTyp[T] {
     type ScalaT = S
-
-    def manifest = implicitly[Manifest[S]]
 
     def proof = mTE
 
     def proxy(e: Expr[ScalaT]): T = pr(e)
 
+    def stringRep = name
+
     def extract(x: T): Expr[ScalaT] = ex(x)
   }
 
   type Typ[T] = ProxyTyp[T]
+
+  implicit val nothingCanBeNothing: Nothing CanBe Nothing = fromFunction[Nothing, Nothing]((x: Nothing) => x)
+  implicit val NothingTyp: Typ[Nothing] = getProxy[Nothing, Nothing]("Nothing", (x: Expr[Nothing]) => ???, (x: Nothing) => Constant(???))
 
   // expressions with type T
   abstract class Expr[+T] {
@@ -120,7 +128,7 @@ trait CommonExpr extends Common {
 
   // Identifiers
   case class Id[I](s: Symbol) extends Expr[I] {
-    override def toString = s.toString
+    override def toString = s.name
 
     def eval() = sys.error(s"Cannot evaluate free var $s")
   }
@@ -133,10 +141,9 @@ trait CommonExpr extends Common {
   }
 
   // Lambda
-  case class Lambda[I: Manifest, T](x: Id[I], expr: Expr[T]) extends Expr[I => T] {
+  case class Lambda[I, T](x: Id[I], expr: Expr[T]) extends Expr[I => T] {
 
-    val symbolType = implicitly[Manifest[I]]
-    override def toString = s"($x: $symbolType) => $expr"
+    override def toString = s"($x: ???) => $expr"
 
     def eval(): I => T = {
       (i: I) =>
@@ -147,7 +154,6 @@ trait CommonExpr extends Common {
   implicit def liftFunction[A, B](f: A => B)(implicit typA: Typ[A], typB: Typ[B]): Lambda[typA.ScalaT, typB.ScalaT] = {
     val s = Id[typA.ScalaT](freshSymbol())
     val block = typB.extract(f(typA.proxy(s)))
-    implicit val manifest = typA.manifest
     Lambda(s, block)
   }
 
@@ -156,6 +162,8 @@ trait CommonExpr extends Common {
 trait AbstractBoolean extends Common {
 
   implicit def boolProof: scala.Boolean CanBe Boolean
+
+  implicit def boolTyp: Typ[Boolean]
 
   // TODO: Why do I have to make this explicit ???
   implicit def boolLift(b: scala.Boolean): Boolean = lift(b)(boolProof)
@@ -175,8 +183,12 @@ trait AbstractBoolean extends Common {
 
 trait EvaluationBoolean extends CommonEval with AbstractBoolean {
 
-  // This stuff causes an initialization error without lazy
+  //TODO: understand why This stuff causes an initialization error without lazy
   lazy val boolProof = fromFunction(EvaluationBooleanProxy)
+
+  //TODO: this is probably refactorable in a typ[T] type parametric funciton in Common
+  implicit val boolTyp: Typ[Boolean] = typ[Boolean]
+
 
   case class EvaluationBooleanProxy(b: scala.Boolean) extends BooleanProxy {
     def &&(that: Boolean): Boolean = b && that.b
@@ -192,7 +204,7 @@ trait EvaluationBoolean extends CommonEval with AbstractBoolean {
 trait ExprBoolean extends CommonExpr with AbstractBoolean {
 
   implicit lazy val boolProof = fromFunction((x: scala.Boolean) => ExprBoolProxy(Constant(x)))
-  implicit val boolTyp: Typ[Boolean] = getProxy[scala.Boolean, Boolean](ExprBoolProxy, _.e)
+  implicit val boolTyp: Typ[Boolean] = getProxy[scala.Boolean, Boolean]("Boolean", ExprBoolProxy, _.e)
 
 
   case class BoolAnd(a: Expr[scala.Boolean], b: Expr[scala.Boolean]) extends Expr[scala.Boolean] {
@@ -262,6 +274,8 @@ trait AbstractInt extends Common {
 
   implicit def intProof: scala.Int CanBe Int
 
+  implicit def intTyp: Typ[Int]
+
   implicit def intLift(b: scala.Int): Int = lift(b)(intProof)
 
   trait IntProxy {
@@ -289,11 +303,13 @@ trait EvaluationInt extends CommonEval with AbstractInt {
 
 
   lazy val intProof = fromFunction(EvaluationIntProxy)
+  implicit val intTyp: Typ[Int] = typ[Int]
+
 
   case class EvaluationIntProxy(i: scala.Int) extends IntProxy {
     def +(other: Int) = i + other.i
 
-    def ==(other: Int) = lift(i == other.i)
+    def ==(other: Int) = i == other.i
 
     override def toString = i.toString
 
@@ -305,7 +321,7 @@ trait EvaluationInt extends CommonEval with AbstractInt {
 
 trait ExprInt extends CommonExpr with AbstractInt {
   implicit lazy val intProof = fromFunction((x: scala.Int) => ExprIntProxy(Constant(x)))
-  implicit val intTyp: Typ[Int] = getProxy[scala.Int, Int](ExprIntProxy, _.e)
+  implicit val intTyp: Typ[Int] = getProxy[scala.Int, Int]("Int", ExprIntProxy, _.e)
 
   case class IntPlus(a: Expr[scala.Int], b: Expr[scala.Int]) extends Expr[scala.Int] {
     override def toString = "(" + a.toString + " + " + b.toString + ")"
@@ -346,176 +362,250 @@ trait NumericProxies {
   }
 }
 
-trait AbstractWorld extends AbstractBoolean with AbstractIf with AbstractInt with NumericProxies {
-  outer =>
+trait AbstractList extends Common {
+
+  implicit def listProof[T: Typ]: scala.List[T] CanBe List[T]
+
+  implicit def listTyp[T: Typ]: Typ[List[T]]
+
+  implicit def listLift[T: Typ](l: scala.List[T]): List[T] = lift(l)(listProof)
 
 
-  type L[T] // type B in the paper TODO: see if this is actually needed (too restrictive ?)
+  trait ListProxy[+T] {
+  }
 
-  implicit def LTpe[T]: Typ[L[T]]
+  type List[+T] <: ListProxy[T]
 
-  def foldr[A, B](k: (A, B) => B)(z: B)(xs: L[A]): B
+  def cons[T: Typ](head: T, tail: List[T]): List[T]
 
-  //def build[A, B](g: (B, (A, B) => B) => B): B
-  def build[A](g: ((A, L[A]) => L[A], L[A]) => L[A]): L[A]
+  def nil: List[Nothing]
+
+  def list[T, U](a: U*)(implicit canBe: U CanBe T, typT: Typ[T]): List[T] = {
+    if (a.isEmpty) nil else a.map(canBe.apply).foldRight[List[T]](nil)(cons)
+  }
+
+  def emptyList[T]: List[T] = nil
+}
+
+trait EvaluationList extends CommonEval with AbstractList {
+
+  def listProof[T: Typ] = fromFunction[scala.List[T], List[T]](EvaluationListProxy.apply)
+
+  def listTyp[T: Typ]: Typ[List[T]] = typ(Manifest.classType(EvaluationListProxy.getClass))
+
+  case class EvaluationListProxy[+T: Typ](l: scala.List[T]) extends ListProxy[T] {
+
+  }
+
+  type List[+T] = EvaluationListProxy[T]
+
+  def cons[T: Typ](head: T, tail: List[T]): List[T] = scala.::(head, tail.l)
+
+  def nil: List[Nothing] = EvaluationListProxy(scala.Nil)(typ[Nothing])
+}
+
+trait ExprList extends CommonExpr with AbstractList {
+
+  def listProof[T: Typ] = fromFunction[scala.List[T], List[T]](ExprListProxy.apply)
+
+  def listTyp[T: Typ]: Typ[List[T]] = {
+    val tt = implicitly[Typ[T]]
+    getProxy[scala.List[T], List[T]](s"List[$tt]", { case Constant(l) => ExprListProxy(l) }, x => Constant(x.l))(listProof)
+  }
 
 
-  def and(xs: L[Boolean]): Boolean = foldr[Boolean, Boolean](_ && _)(_true)(xs)
+  // TODO: What if I really want List[Expr[Typ[T]#ScalaT]] (or something like that)
+  case class ExprListProxy[+T: Typ](l: scala.List[T]) extends ListProxy[T] {
 
-  def sum[A: Numeric](xs: L[A]): A = {
+  }
+
+  type List[+T] = ExprListProxy[T]
+
+  def cons[T: Typ](head: T, tail: List[T]): List[T] = scala.::(head, tail.l)
+
+  def nil: List[Nothing] = ExprListProxy(Nil)
+}
+
+
+trait AbstractFold extends Common {
+  self: AbstractList with AbstractBoolean with AbstractIf with AbstractInt =>
+
+  def foldr[A: Typ, B: Typ](k: (A, B) => B)(z: B)(xs: List[A]): B
+
+  def build[A: Typ](g: ((A, List[A]) => List[A], List[A]) => List[A]): List[A] = g(cons, nil)
+
+
+  def and(xs: List[Boolean]): Boolean = foldr[Boolean, Boolean](_ && _)(_true)(xs)
+
+  def sum[A: Typ : Numeric](xs: List[A]): A = {
     val tc = implicitly[Numeric[A]]
     foldr(tc.plus)(tc.zero)(xs)
   }
 
-  def elem[A](x: A)(xs: L[A]): Boolean = foldr[A, Boolean](_ == x || _)(_false)(xs)
+  def elem[A: Typ](x: A)(xs: List[A]): Boolean = foldr[A, Boolean](_ == x || _)(_false)(xs)
 
   //def map[A, B](f: A => B)(xs: L[A]): L[B] = foldr[A, L[B]](f(_) :: _)(Nil)(xs)
-  def map[A, B](f: A => B)(xs: L[A]): L[B] = build[B] { (cons, nil) =>
-    foldr[A, L[B]]((a, b) => cons(f(a), b))(nil)(xs)
+  def map[A: Typ, B: Typ](f: A => B)(xs: List[A]): List[B] = build[B] { (cons, nil) =>
+    foldr[A, List[B]]((a, b) => cons(f(a), b))(nil)(xs)
   }
 
   //def filter[A](f: A => Boolean)(xs: L[A]): L[A] = foldr[A, L[A]]((a, b) => if(f(a)) a :: b else b)(Nil)(xs)
-  def filter[A](f: A => Boolean)(xs: L[A]): L[A] = build[A] { (cons, nil) =>
-    foldr[A, L[A]]((a, b) => _if_then_else[L[A], L[A], L[A]](f(a)) {
-      // TODO: having to specify the types is annoying here
+  def filter[A: Typ](f: A => Boolean)(xs: List[A]): List[A] = build[A] { (cons, nil) =>
+    foldr[A, List[A]]((a, b) => _if_then_else(f(a)) {
       cons(a, b)
     } {
       b
     })(nil)(xs)
   }
 
-  //def ++[A](xs: L[A], ys: L[A]): L[A] = 
-  def ++[A](xs: L[A], ys: L[A]): L[A] = build[A] { (cons, nil) =>
-    foldr[A, L[A]]((a, b) => cons(a, b))(ys)(xs)
+  //def ++[A](xs: L[A], ys: L[A]): L[A] =
+  def ++[A: Typ, B >: A : Typ](xs: List[A], ys: List[B]): List[B] = build[B] { (cons, nil) =>
+    foldr[A, List[B]]((a, b) => cons(a, b))(ys)(xs)
   }
 
   //def concat[A](xs: L[L[A]]): L[A] = foldr[L[A], L[A]](_ ::: _)(Nil)(xs)
-  def concat[A](xs: L[L[A]]): L[A] = build[A] { (cons, nil) =>
-    foldr[L[A], L[A]](++)(nil)(xs)
+  def concat[A: Typ](xs: List[List[A]]): List[A] = build[A] { (cons, nil) =>
+    foldr[List[A], List[A]](++)(nil)(xs)
   }
 
-  def foldl[A, B](k: (B, A) => B)(z: B)(xs: L[A]): B =
-    foldr[A, B => B]((a, b) => x => b(k(x, a)))(identity)(xs)(z)
-
-  // TODO: implement these
-  //def repeat x
-  //def zip xs ys
-
+  def foldl[A: Typ, B: Typ](k: (B, A) => B)(z: B)(xs: List[A]): B = {
+    // B => B is not a DLS type
+    //val inner = foldr[A, B => B]((a, b) => x => b(k(x, a)))(identity)(xs)
+    //inner(z)
+    ???
+  }
 
   // TODO: understand how these come into play
-  def nil[A] = build[A] { (c, n) => n }
-
-  def cons[A](x: A, xs: L[A]) = build[A] { (c, n) => c(x, foldr(c)(n)(xs)) }
+  //def nil[A] = build[A] { (c, n) => n }
+  //def cons[A](x: A, xs: List[A]) = build[A] { (c, n) => c(x, foldr(c)(n)(xs)) }
 
   // Additional functions not in the paper
-  def length[A](xs: L[A]) = foldr[A, Int]((a, b) => b + 1)(0)(xs)
+  def length[A: Typ](xs: List[A]) = foldr[A, Int]((a, b) => b + 1)(0)(xs)
 
+}
+
+trait EvaluationFold extends CommonEval with AbstractFold {
+  self: EvaluationList with EvaluationBoolean with EvaluationIf with EvaluationInt =>
+
+  def foldr[A: Typ, B: Typ](k: (A, B) => B)(z: B)(xs: List[A]): B = xs.l.foldRight(z)(k)
+
+}
+
+trait ExprFold extends CommonExpr with AbstractFold {
+  self: ExprList with ExprBoolean with ExprIf with ExprInt =>
+
+  case class Foldr[A, B](k: Expr[(A, B)] => Expr[B], z: Expr[B], xs: List[Expr[A]]) extends Expr[B] {
+    def eval() : B = ???
+  }
+
+  def foldr[A: Typ, B: Typ](k: (A, B) => B)(z: B)(xs: List[A]): B = ???
+
+  def foldr[A, B, C, D](k: (A, B) => B)(z: B)(xs: List[A])(implicit typA: Typ[A], typB : Typ[B], ac: A CanBe C, bc: B CanBe D): B = {
+  ???
+  }
+}
+
+trait InfixListOps extends Common {
+  self: AbstractList with AbstractFold with AbstractBoolean =>
 
   // Helpers used to call functions in an infix manner
-  implicit class InfixL[A](xs: L[A]) {
-    lazy val length = outer.length(xs)
+  implicit class InfixL[A: Typ](xs: List[A]) {
+    lazy val length = self.length(xs)
 
-    def sum(implicit n: Numeric[A]) = outer.sum(xs)
+    def sum(implicit n: Numeric[A]) = self.sum(xs)
 
-    def elem(x: A) = outer.elem(x)(xs)
+    def elem(x: A) = self.elem(x)(xs)
 
-    def map[B](f: A => B) = outer.map(f)(xs)
+    def map[B: Typ](f: A => B) = self.map(f)(xs)
 
-    def filter(f: A => Boolean) = outer.filter(f)(xs)
+    def filter(f: A => Boolean) = self.filter(f)(xs)
 
-    def ++(other: L[A]) = outer.++(xs, other)
+    def ++[B >: A : Typ](other: List[B]) = self.++(xs, other)
 
     def all(p: A => Boolean) = map(p).and
+
+    def foldr[B: Typ](z: B)(k: (A, B) => B): B = self.foldr(k)(z)(xs)
+
+    def foldl[B: Typ](z: B)(k: (B, A) => B): B = self.foldl(k)(z)(xs)
   }
 
-  implicit class InfixLBoolean(xs: L[Boolean]) extends InfixL[Boolean](xs) {
-    def and = outer.and(xs)
+  implicit class InfixLBoolean(xs: List[Boolean]) extends InfixL[Boolean](xs) {
+    def and = self.and(xs)
   }
 
-  implicit class InfixLL[A](xs: L[L[A]]) extends InfixL[L[A]](xs) {
-    def concat = outer.concat(xs)
+  implicit class InfixLL[A: Typ](xs: List[List[A]]) extends InfixL[List[A]](xs) {
+    def concat = self.concat(xs)
   }
 
 }
 
-object EvaluationWorld extends AbstractWorld
-  with CommonEval with EvaluationBoolean with EvaluationIf with EvaluationInt with NumericProxies {
+object EvaluationTest extends Runner with CommonEval
+  with EvaluationBoolean with EvaluationIf with EvaluationInt with NumericProxies
+  with EvaluationList with EvaluationFold with InfixListOps {
 
-  type L[T] = MyList[T]
+  // For some reason, the compiler cannot infer these bad boys (and there have to be in direct scope ???)
+  implicit val typListNothing: Typ[List[Nothing]] = listTyp[Nothing]
+  implicit val listNothingCanBeListNothing: List[Nothing] CanBe List[Nothing] = identLift[List[Nothing]](listTyp[Nothing])
 
-  def LTpe[T]: Typ[L[T]] = Manifest.classType(MyList.getClass)
 
-  def foldr[A, B](k: (A, B) => B)(z: B)(xs: L[A]): B = xs match {
-    case MyNil => z
-    case MyCons(x, xs) => k.curried(x)(foldr(k)(z)(xs))
-  }
+  def assertEquals(a: Boolean, b: Boolean): Unit = assert(a == b)
 
-  def build[A](g: ((A, L[A]) => L[A], L[A]) => L[A]): L[A] = g(MyCons(_, _), MyNil)
+  def assertEquals(a: Int, b: Int): Unit = assert(a == b)
+
+  def assertEquals[T](a: List[T], b: List[T]): Unit = assert(a == b)
 
 
   // A few checks to make sure the evaluation is correct
-  assert(and(MyNil) == _true)
-  assert(and(MyList(_true)) == _true)
-  assert(and(MyList(_false)) == _false)
-  assert(and(MyList(_true, _true)) == _true)
-  assert(and(MyList(_false, _true)) == _false)
-  assert(and(MyList(_true, _false)) == _false)
-  assert(and(MyList(_false, _false)) == _false)
+  def run(): Unit = {
+    assertEquals(nil.and, true)
+    assertEquals(list(true).and, true) //TODO : why do I have to use _true here ?
+    assertEquals(list(false).and, false)
+    assertEquals(list(true, true).and, true)
+    assertEquals(list(false, true).and, false)
+    assertEquals(list(true, false).and, false)
+    assertEquals(list(false, false).and, false)
 
-  assert(sum[Int](MyNil) == _0)
-  assert(sum(MyList(_1, _2, _3)) == _6)
+    assertEquals(emptyList[Int].sum, 0)
+    assertEquals(sum(list(1, 2, 3)), 6)
 
-  assert(elem(_0)(MyNil) == _false)
-  assert(elem(_0)(MyList(_1, _2, _3)) == _false)
-  assert(elem(_0)(MyList(_1, _0, _3)) == _true)
 
-  assert(map[Int, Int](_ + _2)(MyList(_1, _2, _3)) == MyList(_3, _4, _5))
-  assert(map[Int, Int](_ + _2)(MyNil) == MyNil)
+    assertEquals(emptyList[Int].elem(0), false)
+    assertEquals(list(1, 2, 3).elem(0), false)
+    assertEquals(list(1, 0, 3).elem(0), true)
 
-  assert(filter[Int](_ == _2)(MyList(_1, _2, _3)) == MyList(_2))
-  assert(filter[Int](x => false)(MyList(_1, _2, _3)) == MyNil)
-  assert(filter[Int](x => true)(MyList(_1, _2, _3)) == MyList(_1, _2, _3))
+    assertEquals(list(1, 2, 3).map(_ + 2), list(3, 4, 5))
+    assertEquals(emptyList[Int].map(_ + 2), nil)
 
-  assert(++(MyList(_1, _2, _3), MyList(_4, _5, _6)) == MyList(_1, _2, _3, _4, _5, _6))
-  assert(++(MyNil, MyList(_4, _5, _6)) == MyList(_4, _5, _6))
-  assert(++(MyList(_1, _2, _3), MyNil) == MyList(_1, _2, _3))
 
-  assert(concat(MyList(MyNil, MyNil, MyNil)) == MyNil)
-  assert(concat(MyList(MyNil, MyList(_1, _2, _3))) == MyList(_1, _2, _3))
-  assert(concat(MyList(MyList(_1, _2, _3), MyNil)) == MyList(_1, _2, _3))
-  assert(concat(MyList(MyList(_1, _2, _3), MyList(_4, _5, _6))) == MyList(_1, _2, _3, _4, _5, _6))
+    assertEquals(list(1, 2, 3).filter(_ == _2), list(2)) // untyped equals makes my code ugly
+    assertEquals(list(1, 2, 3).filter(x => false), nil)
+    assertEquals(list(1, 2, 3).filter(x => true), list(1, 2, 3))
 
-  val right = foldr[Int, L[Int]]((a, b) => MyCons(b.length + a, b))(MyNil)(MyList(_1, _2, _3, _4))
-  val left = foldl[Int, L[Int]]((b, a) => MyCons(b.length + a, b))(MyNil)(MyList(_1, _2, _3, _4))
-  assert(right == MyList(_4, _4, _4, _4))
-  assert(left == MyList(_7, _5, _3, _1))
+    assertEquals(list(1, 2, 3) ++ list(4, 5, 6), list(1, 2, 3, 4, 5, 6))
+    // need the emptyList construct because the compile would rather upcast than apply an implicit conversion
+    assertEquals(emptyList[Int] ++ list(4, 5, 6), list(4, 5, 6))
+    assertEquals(list(1, 2, 3) ++ nil, list(1, 2, 3))
 
-  println("All evaluation test passed")
+    assertEquals(list(nil, nil, nil).concat, nil)
+    assertEquals(list(nil, list(4, 5, 6)).concat, list(4, 5, 6))
+    assertEquals(list(list(1, 2, 3), nil).concat, list(1, 2, 3))
+    assertEquals(list(list(1, 2, 3), list(4, 5, 6)).concat, list(1, 2, 3, 4, 5, 6))
 
+    val right = list(1, 2, 3, 4).foldr(emptyList[Int])((a, b) => cons(b.length + a, b))
+    assertEquals(right, list(4, 4, 4, 4))
+
+    //val left = list(1, 2, 3, 4).foldl(emptyList[Int])((b, a) => cons(b.length + a, b))
+    //assertEquals(left, list(7, 5, 3, 1))
+
+    println("=================== All evaluation test passed")
+  }
 }
 
-object ExprWorld extends AbstractWorld
-  with CommonExpr with ExprBoolean with ExprIf with ExprInt with NumericProxies {
 
-  type L[T] = MyList[T]
+object ExprTest extends Runner with CommonExpr
+  with ExprBoolean with ExprIf with ExprInt with NumericProxies
+  with ExprList with ExprFold with InfixListOps {
 
-  def LTpe[T]: Typ[L[T]] = ???
-
-  case class FoldR[A, B: Manifest](k: (A, B) => B, z: B, xs: L[A]) extends Expr[B] {
-    def eval() = ???
-  }
-
-  case class Build[A: Manifest](g: ((A, L[A]) => L[A], L[A]) => L[A]) extends Expr[L[A]] {
-    def eval() = ???
-  }
-
-  def foldr[A, B: Manifest](k: (A, B) => B)(z: B)(xs: L[A]): B = ??? // FoldR(k, z, xs))
-
-  def build[A: Manifest](g: ((A, L[A]) => L[A], L[A]) => L[A]): L[A] = ??? // eval(Build(g))
-
-  def foldr[A, B](k: (A, B) => B)(z: B)(xs: L[A]): B = ???
-
-  def build[A](g: ((A, L[A]) => L[A], L[A]) => L[A]): L[A] = ???
 
   def evalProxy[T](expr: T)(implicit typ: Typ[T]): typ.ScalaT = {
     typ.extract(expr).eval()
@@ -536,34 +626,64 @@ object ExprWorld extends AbstractWorld
         case Constant(x) => Constant(x)
         case _ => sys.error(s"Dont know how to transform : $expr")
       }
-    }).asInstanceOf[Expr[T]] // can we do without ?
+    }).asInstanceOf[Expr[T]] // TODO : can we do without cast ?
   }
 
 
-  val intValue = _1 + 2 + 3
 
-  val booleanValue = (_true && false) || true
+  def liftFunctionGood[A, B, C, D](f : A => B)(implicit typA : Typ[A], typB: Typ[B], ca: C CanBe A, db: D CanBe B) : Expr[C => D] = {
+    def transformed(c : Expr[typA.ScalaT]) = {
+      val argument = typA.proxy(c)
+      val result = f(argument)
+      typB.extract(result)
+    }
 
-  val ifThenElse = _if_then_else(booleanValue)(intValue)(intValue + 14)
+    //val t = Id[C]
+    Lambda(???, ???)
+  }
 
-  val function = (x: Int) => x + ifThenElse
 
-  val liftedFunction = liftFunction(function)
+  def run(): Unit = {
+    val intValue = _1 + 2 + 3
 
-  println(stringProxy(ifThenElse))
-  println(s"Result of the evaluation : ${evalProxy(ifThenElse)}")
-  println(function)
-  println(liftedFunction)
-  val argument = liftedFunction.symbolType.unapply(45).get // TODO: I don't want to have to do that
-  val evaluatedFunction= liftedFunction.eval()
-  println(argument)
-  println(evaluatedFunction)
-  println(s"Evaluation of lifted funciton : ${evaluatedFunction.apply(argument)}")
+    val booleanValue = (_true && false) || true
+
+    val listValue = list(1, 2, 3, 4, 5)
+
+    println(listValue)
+
+    val ifThenElse = _if_then_else(booleanValue)(intValue)(intValue + 14)
+
+    val function = (x: Int) => x + ifThenElse
+
+    val liftedFunction = liftFunction(function)
+
+    println(stringProxy(ifThenElse))
+    println(s"Result of the evaluation : ${evalProxy(ifThenElse)}")
+    println(function)
+    println(liftedFunction)
+
+
+    // TODO: I don't want to have to do that, why can't the compiler figure it out ?
+    val argument = 45.asInstanceOf[ExprTest.intTyp.ScalaT]
+    val evaluatedFunction = liftedFunction.eval()
+    println(argument)
+    println(evaluatedFunction)
+    println(s"Evaluation of lifted funciton : ${evaluatedFunction.apply(argument)}")
+
+
+
+
+  }
+}
+
+trait Runner {
+  def run(): Unit
 }
 
 object Main {
   def main(args: Array[String]): Unit = {
-    val eval = EvaluationWorld
-    val expr = ExprWorld
+    val runners = List(EvaluationTest, ExprTest)
+    runners foreach (_.run())
   }
 }
