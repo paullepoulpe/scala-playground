@@ -8,34 +8,11 @@
 // Get all of the good stuff
 import scala.language._
 import scala.annotation.implicitNotFound
+import scala.annotation.unchecked.uncheckedVariance
 
-/* Simple lists with no methods */
-sealed trait MyList[+T] {
-  def toList: List[T]
-}
-
-object MyList {
-  def apply[T](xs: T*): MyList[T] =
-    if (xs.isEmpty) MyNil
-    else MyCons(xs.head, MyList(xs.tail: _*))
-}
-
-case object MyNil extends MyList[Nothing] {
-  override def toString = "L()"
-
-  def toList = Nil
-}
-
-
-case class MyCons[T](x: T, xs: MyList[T]) extends MyList[T] {
-  override def toString = toList.mkString("L(", ",", ")")
-
-  def toList = x :: xs.toList
-}
 
 trait Common {
-
-  @implicitNotFound("${T} is not a DSL type")
+  @implicitNotFound("${T} is not a supported type")
   type Typ[T]
 
   @implicitNotFound("${A} cannot be viewed as ${B}")
@@ -43,10 +20,8 @@ trait Common {
     def apply(a: A): B
   }
 
-  // Can't write this cause the compiler gets confused with implicit resolution
-  //type CanBe[A, B] = A => B
 
-  def fromFunction[A, B](f: A => B) = new CanBe[A, B] {
+  def fromFunction[A, B](f: A => B): A CanBe B = new CanBe[A, B] {
     def apply(x: A) = f(x)
   }
 
@@ -68,95 +43,179 @@ trait CommonEval extends Common {
   implicit val NothingTyp = Typ("Nothing")
 }
 
-/* Common expression trait shared by all traits that create Expressions */
-trait CommonExpr extends Common {
+trait BetterExpr extends Common {
+
+  def typ[T: Typ] = implicitly[Typ[T]]
+
+  abstract class Expr[+T: Typ] {
+    def selfTyp: Typ[T@uncheckedVariance] = implicitly[Typ[T]]
+  }
+
+  trait Typ[T] {
+    def proxy(e: Expr[T]): T
+
+    def extract(t: T): Expr[T]
+  }
+
+
+  def createTyp[T](pr: Expr[T] => T, ex: T => Expr[T], name: String = "???"): Typ[T] = new Typ[T] {
+    def proxy(e: Expr[T]): T = pr(e)
+
+    def extract(t: T): Expr[T] = ex(t)
+
+    override def toString = name
+  }
+
+  // Important to have a bijective version of Lift so we can remap to non lifted type without a cast
+  trait UniqueLift[A, B] {
+    def apply(a: A): B
+
+    def from: String
+
+    def to: String
+  }
+
+  def uniq[A, B](implicit uniqueLift: UniqueLift[A, B]) = uniqueLift
+
+  implicit def provedFromUniq[A, B](implicit uniqueLift: UniqueLift[A, B]) = fromFunction[A, B](uniqueLift.apply(_))
+
+  case class Constant[+A, +B: Typ](x: A) extends Expr[B]
+
+  // This allows you to base your proofs that a type A can be lifted to B (A CanBe B)
+  def unit[A, B: Typ](x: A): B = implicitly[Typ[B]].proxy(Constant(x))
+
+  def proveUniq[A: Manifest, B: Typ]: A UniqueLift B = new UniqueLift[A, B] {
+    def apply(a: A) = unit(a)
+
+    def from = manifest[A].runtimeClass.toString
+
+    def to = typ[B].toString
+  }
+
+  case class Sym[T: Typ](name: String) extends Expr[T]
 
   private var numSymbols = 0
 
-  def freshSymbol(): Symbol = {
-    val curSym = s"x$numSymbols"
+  def freshSym[T: Typ]: Sym[T] = {
+    val name = s"x$numSymbols"
     numSymbols += 1
-    Symbol(curSym)
-  }
-
-  abstract class ProxyTyp[T] {
-    type ScalaT
-
-    def stringRep: String
-
-    def proof: ScalaT CanBe T
-
-    def proxy(e: Expr[ScalaT]): T
-
-    def extract(x: T): Expr[ScalaT]
-
-    override def toString = stringRep
-  }
-
-  def getProxy[S, T](name: String, pr: Expr[S] => T, ex: T => Expr[S])(implicit mTE: S CanBe T) = new ProxyTyp[T] {
-    type ScalaT = S
-
-    def proof = mTE
-
-    def proxy(e: Expr[ScalaT]): T = pr(e)
-
-    def stringRep = name
-
-    def extract(x: T): Expr[ScalaT] = ex(x)
-  }
-
-  type Typ[T] = ProxyTyp[T]
-
-  implicit val nothingCanBeNothing: Nothing CanBe Nothing = fromFunction[Nothing, Nothing]((x: Nothing) => x)
-  implicit val NothingTyp: Typ[Nothing] = getProxy[Nothing, Nothing]("Nothing", (x: Expr[Nothing]) => ???, (x: Nothing) => Constant(???))
-
-  // expressions with type T
-  abstract class Expr[+T] {
-    def toString: String
-
-    def eval(): T
-  }
-
-  // extends Dynamic ?
-
-  // Constants
-  case class Constant[+T](x: T) extends Expr[T] {
-    override def toString = x.toString
-
-    def eval() = x
-  }
-
-  // Identifiers
-  case class Id[I](s: Symbol) extends Expr[I] {
-    override def toString = s.name
-
-    def eval() = sys.error(s"Cannot evaluate free var $s")
+    Sym[T](name)
   }
 
 
-  type Subst = Map[Expr[Any], Expr[Any]]
+}
 
-  def transform[T](subst: Subst)(expr: Expr[T]): Expr[T] = {
-    sys.error("Don't know how to transform")
+trait BetterBooleans extends BetterExpr with AbstractBoolean {
+
+  implicit def boolUniq: UniqueLift[scala.Boolean, Boolean] = proveUniq[scala.Boolean, Boolean]
+
+  implicit def boolProof = provedFromUniq[scala.Boolean, Boolean](boolUniq)
+
+  implicit def boolTyp = createTyp[Boolean](BetterBoolean(_), _.e, "Boolean")
+
+  case class BoolAnd(l: Expr[Boolean], r: Expr[Boolean]) extends Expr[Boolean]
+
+  case class BoolOr(l: Expr[Boolean], r: Expr[Boolean]) extends Expr[Boolean]
+
+  case class BoolNot(b: Expr[Boolean]) extends Expr[Boolean]
+
+  case class BetterBoolean(e: Expr[Boolean]) extends BooleanProxy {
+    def ||(other: Boolean) = BetterBoolean(BoolOr(e, other.e))
+
+    def &&(other: Boolean) = BetterBoolean(BoolAnd(e, other.e))
+
+    def unary_! = BetterBoolean(BoolNot(e))
   }
 
-  // Lambda
-  case class Lambda[I, T](x: Id[I], expr: Expr[T]) extends Expr[I => T] {
+  type Boolean = BetterBoolean
 
-    override def toString = s"($x: ???) => $expr"
 
-    def eval(): I => T = {
-      (i: I) =>
-        transform(Map(x -> Constant(i)))(expr).eval()
+}
+
+trait BetterInts extends BetterExpr with AbstractInt {
+  self: BetterBooleans =>
+
+  implicit def intUniq: UniqueLift[scala.Int, Int] = proveUniq[scala.Int, Int]
+
+  implicit def intProof = provedFromUniq[scala.Int, Int](intUniq)
+
+  implicit def intTyp = createTyp[Int](BetterInt(_), _.e, "Int")
+
+  case class IntPlus(l: Expr[Int], r: Expr[Int]) extends Expr[Int]
+
+  case class IntEqual(l: Expr[Int], r: Expr[Int]) extends Expr[Boolean]
+
+  case class IntNotEqual(l: Expr[Int], r: Expr[Int]) extends Expr[Boolean]
+
+  case class BetterInt(e: Expr[Int]) extends IntProxy {
+    def +(other: Int): Int = BetterInt(IntPlus(e, other.e))
+
+    def ==(other: Int): Boolean = BetterBoolean(IntEqual(e, other.e))
+
+    def !=(other: Int): Boolean = BetterBoolean(IntNotEqual(e, other.e))
+  }
+
+  type Int = BetterInt
+}
+
+trait BetterIf extends BetterExpr with AbstractIf {
+  self: BetterBooleans =>
+
+  case class IfNode[T: Typ](cond: Expr[Boolean], thenBlock: Expr[T], elseBlock: Expr[T]) extends Expr[T]
+
+  def _if_then_else[TB, EB, RES](cond: Boolean)(thenBlock: => TB)(elseBlock: => EB)
+                                (implicit t2r: TB CanBe RES, e2r: EB CanBe RES, resTyp: Typ[RES]): RES = {
+
+    val thenExpr: Expr[RES] = resTyp.extract(t2r(thenBlock))
+    val elseExpr: Expr[RES] = resTyp.extract(e2r(elseBlock))
+    val node: Expr[RES] = IfNode(cond.e, thenExpr, elseExpr)
+    resTyp.proxy(node)
+  }
+}
+
+trait BetterLists extends BetterExpr with AbstractList {
+
+
+  case class UniqueListLift[A, B](typT: Typ[B], uniq: UniqueLift[A, B]) extends UniqueLift[scala.List[A], List[B]] {
+    def apply(l: scala.List[A]): List[B] = {
+      val scalaListT: scala.List[B] = l.map(uniq.apply(_))
+      listProof(typT).apply(scalaListT)
+    }
+
+    def from = s"scala.List[${uniq.from}]"
+
+    def to = s"List[${uniq.to}]"
+  }
+
+  implicit def listUniq[A, T](implicit typT: Typ[T], uniq: UniqueLift[A, T]) = UniqueListLift(typT, uniq)
+
+  implicit def listProof[T: Typ] = new CanBe[scala.List[T], List[T]] {
+    def apply(l: scala.List[T]) = l.foldRight[List[T]](emptyList[T]) { (head, tail) =>
+      typ[List[T]].proxy(Cons(typ[T].extract(head), typ[List[T]].extract(tail)))
     }
   }
 
-  implicit def liftFunction[A, B](f: A => B)(implicit typA: Typ[A], typB: Typ[B]): Lambda[typA.ScalaT, typB.ScalaT] = {
-    val s = Id[typA.ScalaT](freshSymbol())
-    val block = typB.extract(f(typA.proxy(s)))
-    Lambda(s, block)
+  implicit def listTyp[T: Typ]: Typ[List[T]] = createTyp(BetterList(_), _.l, s"List[${typ[T]}]")
+
+  // Divergent implicits for Typ[Nothing] and Typ[List[Nothing]] => pass them explicitly
+  def nothingTyp: Typ[Nothing] = createTyp[Nothing](_ => ???, _ => ???)
+
+  def listNothingTyp: Typ[List[Nothing]] = createTyp(BetterList[Nothing](_)(nothingTyp), _.l)
+
+  case class Cons[T: Typ](head: Expr[T], tail: Expr[List[T]]) extends Expr[List[T]]
+
+  case object Nil extends Expr[List[Nothing]]()(listNothingTyp)
+
+  case class BetterList[+T: Typ](l: Expr[List[T]]) extends ListProxy[T] {
+
   }
 
+  type List[+T] = BetterList[T]
+
+  def cons[T: Typ](head: T, tail: List[T]): List[T] =
+    typ[List[T]].proxy(Cons(typ[T].extract(head), typ[List[T]].extract(tail)))
+
+  def nil: List[Nothing] = listNothingTyp.proxy(Nil)
 }
 
 trait AbstractBoolean extends Common {
@@ -201,33 +260,6 @@ trait EvaluationBoolean extends CommonEval with AbstractBoolean {
   type Boolean = EvaluationBooleanProxy
 }
 
-trait ExprBoolean extends CommonExpr with AbstractBoolean {
-
-  implicit lazy val boolProof = fromFunction((x: scala.Boolean) => ExprBoolProxy(Constant(x)))
-  implicit val boolTyp: Typ[Boolean] = getProxy[scala.Boolean, Boolean]("Boolean", ExprBoolProxy, _.e)
-
-
-  case class BoolAnd(a: Expr[scala.Boolean], b: Expr[scala.Boolean]) extends Expr[scala.Boolean] {
-    override def toString = "(" + a.toString + " && " + b.toString + ")"
-
-    def eval() = a.eval && b.eval()
-  }
-
-  case class BoolOr(a: Expr[scala.Boolean], b: Expr[scala.Boolean]) extends Expr[scala.Boolean] {
-    override def toString = "(" + a.toString + " || " + b.toString + ")"
-
-    def eval() = a.eval || b.eval()
-
-  }
-
-  case class ExprBoolProxy(e: Expr[scala.Boolean]) extends BooleanProxy {
-    def &&(other: Boolean) = ExprBoolProxy(BoolAnd(e, other.e))
-
-    def ||(other: Boolean) = ExprBoolProxy(BoolOr(e, other.e))
-  }
-
-  type Boolean = ExprBoolProxy
-}
 
 trait AbstractIf extends Common {
   self: AbstractBoolean =>
@@ -245,32 +277,9 @@ trait EvaluationIf extends CommonEval with AbstractIf {
     if (cond.b) t2r(thenBlock) else e2r(elseBlock)
 }
 
-trait ExprIf extends CommonExpr with AbstractIf {
-  self: ExprBoolean =>
-
-  case class IfNode[T](cond: Expr[scala.Boolean], thenBlock: Expr[T], elseBlock: Expr[T]) extends Expr[T] {
-    override def toString =
-      s"""if($cond){
-          |  $thenBlock
-          |} else {
-          |  $elseBlock
-          |}""".stripMargin
-
-    def eval() = if (cond.eval()) thenBlock.eval() else elseBlock.eval()
-  }
-
-  def _if_then_else[TB, EB, RES](cond: Boolean)(thenBlock: => TB)(elseBlock: => EB)
-                                (implicit t2r: TB CanBe RES, e2r: EB CanBe RES, resTyp: Typ[RES]): RES = {
-
-    val thenExpr: Expr[resTyp.ScalaT] = resTyp.extract(t2r(thenBlock))
-    val elseExpr: Expr[resTyp.ScalaT] = resTyp.extract(e2r(elseBlock))
-    val node: Expr[resTyp.ScalaT] = IfNode(cond.e, thenExpr, elseExpr)
-    resTyp.proxy(node)
-  }
-}
-
 trait AbstractInt extends Common {
 
+  self: AbstractBoolean =>
 
   implicit def intProof: scala.Int CanBe Int
 
@@ -280,6 +289,10 @@ trait AbstractInt extends Common {
 
   trait IntProxy {
     def +(other: Int): Int
+
+    def ==(other: Int): Boolean
+
+    def !=(other: Int): Boolean
   }
 
   type Int <: IntProxy
@@ -300,6 +313,7 @@ trait AbstractInt extends Common {
 }
 
 trait EvaluationInt extends CommonEval with AbstractInt {
+  self: EvaluationBoolean =>
 
 
   lazy val intProof = fromFunction(EvaluationIntProxy)
@@ -309,7 +323,9 @@ trait EvaluationInt extends CommonEval with AbstractInt {
   case class EvaluationIntProxy(i: scala.Int) extends IntProxy {
     def +(other: Int) = i + other.i
 
-    def ==(other: Int) = i == other.i
+    def ==(other: Int): Boolean = i == other.i
+
+    def !=(other: Int): Boolean = i != other.i
 
     override def toString = i.toString
 
@@ -317,23 +333,6 @@ trait EvaluationInt extends CommonEval with AbstractInt {
 
   type Int = EvaluationIntProxy
 
-}
-
-trait ExprInt extends CommonExpr with AbstractInt {
-  implicit lazy val intProof = fromFunction((x: scala.Int) => ExprIntProxy(Constant(x)))
-  implicit val intTyp: Typ[Int] = getProxy[scala.Int, Int]("Int", ExprIntProxy, _.e)
-
-  case class IntPlus(a: Expr[scala.Int], b: Expr[scala.Int]) extends Expr[scala.Int] {
-    override def toString = "(" + a.toString + " + " + b.toString + ")"
-
-    def eval() = a.eval() + b.eval()
-  }
-
-  case class ExprIntProxy(e: Expr[scala.Int]) extends IntProxy {
-    def +(other: Int) = ExprIntProxy(IntPlus(e, other.e))
-  }
-
-  type Int = ExprIntProxy
 }
 
 trait NumericProxies {
@@ -404,28 +403,6 @@ trait EvaluationList extends CommonEval with AbstractList {
   def nil: List[Nothing] = EvaluationListProxy(scala.Nil)(typ[Nothing])
 }
 
-trait ExprList extends CommonExpr with AbstractList {
-
-  def listProof[T: Typ] = fromFunction[scala.List[T], List[T]](ExprListProxy.apply)
-
-  def listTyp[T: Typ]: Typ[List[T]] = {
-    val tt = implicitly[Typ[T]]
-    getProxy[scala.List[T], List[T]](s"List[$tt]", { case Constant(l) => ExprListProxy(l) }, x => Constant(x.l))(listProof)
-  }
-
-
-  // TODO: What if I really want List[Expr[Typ[T]#ScalaT]] (or something like that)
-  case class ExprListProxy[+T: Typ](l: scala.List[T]) extends ListProxy[T] {
-
-  }
-
-  type List[+T] = ExprListProxy[T]
-
-  def cons[T: Typ](head: T, tail: List[T]): List[T] = scala.::(head, tail.l)
-
-  def nil: List[Nothing] = ExprListProxy(Nil)
-}
-
 
 trait AbstractFold extends Common {
   self: AbstractList with AbstractBoolean with AbstractIf with AbstractInt =>
@@ -491,17 +468,16 @@ trait EvaluationFold extends CommonEval with AbstractFold {
 
 }
 
-trait ExprFold extends CommonExpr with AbstractFold {
-  self: ExprList with ExprBoolean with ExprIf with ExprInt =>
+trait ExprFold extends BetterExpr with AbstractFold {
+  self: BetterLists with BetterBooleans with BetterIf with BetterInts with FunctionsExpr with TuplesExpr =>
 
-  case class Foldr[A, B](k: Expr[(A, B)] => Expr[B], z: Expr[B], xs: List[Expr[A]]) extends Expr[B] {
-    def eval() : B = ???
+  case class Foldr[A: Typ, B: Typ](k: Lambda[(A, B), B], z: Expr[B], xs: Expr[List[A]]) extends Expr[B] {
+    val typA = typ[A]
+    val typB = typ[B]
   }
 
-  def foldr[A: Typ, B: Typ](k: (A, B) => B)(z: B)(xs: List[A]): B = ???
-
-  def foldr[A, B, C, D](k: (A, B) => B)(z: B)(xs: List[A])(implicit typA: Typ[A], typB : Typ[B], ac: A CanBe C, bc: B CanBe D): B = {
-  ???
+  def foldr[A: Typ, B: Typ](k: (A, B) => B)(z: B)(xs: List[A]): B = {
+    typ[B].proxy(Foldr(Lambda(k.tupled), typ[B].extract(z), typ[List[A]].extract(xs)))
   }
 }
 
@@ -601,79 +577,209 @@ object EvaluationTest extends Runner with CommonEval
   }
 }
 
+trait Tuples extends Common {
 
-object ExprTest extends Runner with CommonExpr
-  with ExprBoolean with ExprIf with ExprInt with NumericProxies
-  with ExprList with ExprFold with InfixListOps {
+}
+
+trait TuplesExpr extends Tuples with BetterExpr {
+  implicit def tupleTyp[A: Typ, B: Typ]: Typ[(A, B)] = createTyp[(A, B)]({
+    case TupleExpr2(t) => t
+    case t: Sym[_] => (typ[A].proxy(Select1(t)), typ[B].proxy(Select2(t)))
+  }, {
+    TupleExpr2(_)
+  }, "(" + typ[A] + "," + typ[B] + ")")
 
 
-  def evalProxy[T](expr: T)(implicit typ: Typ[T]): typ.ScalaT = {
-    typ.extract(expr).eval()
+  case class Select1[A: Typ, B: Typ](tup: Expr[(A, B)]) extends Expr[A] {
+    val typA = typ[A]
+    val typB = typ[B]
   }
 
-  def stringProxy[T: Typ](v: T): String = {
-    val vTyp = implicitly[Typ[T]]
-    vTyp.extract(v).toString
+  case class Select2[A: Typ, B: Typ](tup: Expr[(A, B)]) extends Expr[B] {
+    val typA = typ[A]
+    val typB = typ[B]
   }
 
-  override def transform[T](subst: Subst)(expr: Expr[T]): Expr[T] = {
-    subst.getOrElse(expr, {
+  case class TupleExpr2[A: Typ, B: Typ](tup: (A, B)) extends Expr[(A, B)] {
+    val typA = typ[A]
+    val typB = typ[B]
+
+    def _1 = Select1(this)
+
+    def _2 = Select2(this)
+  }
+
+}
+
+trait Functions extends Common {
+
+}
+
+trait FunctionsExpr extends Functions with BetterExpr {
+
+  implicit def lambdaTyp[A: Typ, B: Typ]: Typ[A => B] = createTyp[A => B]({
+    case Lambda(f) => f
+  }, {
+    f => Lambda(f)
+  }, s"(${typ[A]}) => ${typ[B]}")
+
+
+  case class UniqueFunLift[A, B, C, D](typA: Typ[A], typB: Typ[B],
+                                       uniqCA: UniqueLift[C, A], uniqDB: UniqueLift[D, B]) extends UniqueLift[C => D, A => B] {
+
+    def apply(a: C => D) = unit[C => D, A => B](a)(lambdaTyp(typA, typB))
+
+    def from = uniqCA.from + "=>" + uniqDB.from
+
+    def to = uniqCA.to + "=>" + uniqDB.to
+  }
+
+  implicit def uniqFunlift[A, B, C, D]
+  (implicit typA: Typ[A], typB: Typ[B],
+   uniqCA: UniqueLift[C, A], uniqDB: UniqueLift[D, B]): UniqueLift[C => D, A => B] = UniqueFunLift(typA, typB, uniqCA, uniqDB)
+
+  case class Lambda[-A: Typ, +B: Typ](f: A => B) extends Expr[A => B] {
+    val typA: Typ[A@uncheckedVariance] = typ[A]
+    val typB: Typ[B@uncheckedVariance] = typ[B]
+    lazy val symbol: Expr[A@uncheckedVariance] = freshSym[A]
+    lazy val block: Expr[B] = typ[B].extract(f(typ[A].proxy(symbol)))
+
+    def apply(a: A) = typB.proxy(Apply(this, typA.extract(a)))
+  }
+
+  case class Apply[A: Typ, B: Typ](f: Expr[A => B], arg: Expr[A]) extends Expr[B] {
+    val typA = typ[A]
+    val typB = typ[B]
+  }
+
+}
+
+object ExprTest extends Runner with BetterExpr
+  with BetterBooleans with BetterIf with BetterInts with NumericProxies
+  with BetterLists with FunctionsExpr with TuplesExpr with ExprFold with InfixListOps {
+
+  def string[T: Typ](t: T): String = mkString(typ[T].extract(t))
+
+  def mkString(expr: Expr[Any]): String = expr match {
+    case BoolAnd(l, r) => "(" + mkString(l) + " && " + mkString(r) + ")"
+    case BoolOr(l, r) => "(" + mkString(l) + " || " + mkString(r) + ")"
+    case BoolNot(b) => "!(" + mkString(b) + ")"
+    case IntPlus(l, r) => "(" + mkString(l) + " + " + mkString(r) + ")"
+    case IntEqual(l, r) => "(" + mkString(l) + " == " + mkString(r) + ")"
+    case IntNotEqual(l, r) => "(" + mkString(l) + " != " + mkString(r) + ")"
+    case IfNode(b, t, e) => "if(" + mkString(b) + "){ " + mkString(t) + " } else { " + mkString(e) + " }"
+    case Cons(head, tail) => mkString(head) + " :: " + mkString(tail)
+    case Nil => "Nil"
+    case Constant(x) => x.toString
+    case Sym(name) => name
+    case s@Lambda(f) => "(" + mkString(s.symbol) + ": " + s.typA + ") => " + mkString(s.block)
+    case Apply(f, arg) => "(" + mkString(f) + ").apply(" + mkString(arg) + ")"
+    case Foldr(k, z, xs) => "foldr(" + mkString(k) + ")(" + mkString(z) + ")(" + mkString(xs) + ")"
+    case Select1(x) => mkString(x) + "._1"
+    case Select2(x) => mkString(x) + "._2"
+    case x => sys.error(s"Don't know how to print $x")
+  }
+
+  def eval[T, A](expr: Expr[T])(implicit typT: Typ[T], uniq: UniqueLift[A, T]): A = {
+    (expr match {
+      case c@Constant(x) if c.selfTyp.toString == typT.toString => x
+      case BoolAnd(l, r) => eval(l) && eval(r)
+      case BoolOr(l, r) => eval(l) || eval(r)
+      case BoolNot(b) => !eval(b)
+      case IntPlus(l, r) => eval(l) + eval(r)
+      case IntEqual(l, r) => eval(l) == eval(r)
+      case IntNotEqual(l, r) => eval(l) != eval(r)
+      case IfNode(cond, thn, els) => if (eval(cond)) eval(thn) else eval(els)
+      case c: Cons[_] => uniq match {
+        case u: UniqueListLift[a, t] =>
+          val tail = eval(c.tail.asInstanceOf[Expr[List[t]]])(c.selfTyp.asInstanceOf[Typ[List[t]]], u)
+          val head = eval(c.head.asInstanceOf[Expr[t]])(u.typT, u.uniq)
+          head :: tail
+        case _ => sys.error("Bad unique lift for list")
+      }
+      case Nil => scala.Nil
+      case TupleExpr2(tup) => ???
+      case Select1(t: TupleExpr2[ta, tb]) => {
+        val resExpr = t.typA.extract(t.tup._1)
+        eval(resExpr)(t.typA, uniq.asInstanceOf[UniqueLift[A, ta]])
+      }
+      case Select2(t: TupleExpr2[ta, tb]) => {
+        val resExpr = t.typB.extract(t.tup._2)
+        eval(resExpr)(t.typB, uniq.asInstanceOf[UniqueLift[A, tb]])
+      }
+      case f: Foldr[a, b] => f.xs match {
+        case Cons(head, tail) => {
+          val right = eval(f.copy(xs = tail)(f.typA, f.typB))(f.typB, uniq.asInstanceOf[UniqueLift[A, b]])
+          val resExpr = f.typB.extract(f.k((f.typA.proxy(head), uniq.apply(right).asInstanceOf[b])))
+          eval(resExpr)(f.typB, uniq.asInstanceOf[UniqueLift[A, b]])
+        }
+        case Nil => eval(f.z)(f.typB, uniq.asInstanceOf[UniqueLift[A, b]])
+      }
+      case Lambda(f) => uniq match {
+        case u: UniqueFunLift[a, b, c, d] =>
+          (x: c) => {
+            val param: a = u.uniqCA(x)
+            val res: b = f.asInstanceOf[a => b](param)
+            eval[b, d](u.typB.extract(res))(u.typB, u.uniqDB)
+          }
+        case _ => sys.error("Bad unique lift for lambda")
+      } // Need a way to pattern match on type of uniq
+      case a@Apply(func: Lambda[a, b], arg) => {
+        val resExpr = func.typB.extract(func.f(func.typA.proxy(arg)))
+        eval(resExpr)(func.typB, uniq.asInstanceOf[UniqueLift[A, b]])
+      }
+      case _ => sys.error(s"Don't know how to reduce $expr of type $typT")
+    }).asInstanceOf[A]
+  }
+
+  def evalTyp[A, B](expr: B)(implicit typB: Typ[B], uniqueLift: UniqueLift[A, B]): A = eval(typ[B].extract(expr))
+
+
+  type Subst = PartialFunction[Expr[Any], Expr[Any]]
+
+  def transform[T: Typ](subst: Subst)(expr: Expr[T]): Expr[T] = {
+    subst.lift(expr).getOrElse {
       expr match {
         case IfNode(c, t, e) => IfNode(transform(subst)(c), transform(subst)(t), transform(subst)(e))
         case IntPlus(a, b) => IntPlus(transform(subst)(a), transform(subst)(b))
         case BoolOr(a, b) => BoolOr(transform(subst)(a), transform(subst)(b))
         case BoolAnd(a, b) => BoolAnd(transform(subst)(a), transform(subst)(b))
-        case Constant(x) => Constant(x)
+        case s: Select1[a, b] => {
+          implicit val typA = s.typA
+          implicit val typB = s.typB
+          Select1[a, b](transform(subst)(s.tup))
+        }
+        case s: Select2[a, b] => {
+          implicit val typA = s.typA
+          implicit val typB = s.typB
+          Select2[a, b](transform(subst)(s.tup))
+        }
+        case t: Constant[_, _] => t
         case _ => sys.error(s"Dont know how to transform : $expr")
       }
-    }).asInstanceOf[Expr[T]] // TODO : can we do without cast ?
+    }.asInstanceOf[Expr[T]] // TODO : can we do without cast ?
   }
 
 
-
-  def liftFunctionGood[A, B, C, D](f : A => B)(implicit typA : Typ[A], typB: Typ[B], ca: C CanBe A, db: D CanBe B) : Expr[C => D] = {
-    def transformed(c : Expr[typA.ScalaT]) = {
-      val argument = typA.proxy(c)
-      val result = f(argument)
-      typB.extract(result)
-    }
-
-    //val t = Id[C]
-    Lambda(???, ???)
+  def show[A, B](expr: B)(implicit typB: Typ[B], uniqueLift: UniqueLift[A, B]): Unit = {
+    println(s"Evaluating: ${string(expr)}")
+    println(s"Lifted type: ${uniqueLift.to}, evaluated type: ${uniqueLift.from}")
+    println(s"Result = ${evalTyp(expr)}")
+    println()
   }
 
 
   def run(): Unit = {
-    val intValue = _1 + 2 + 3
-
-    val booleanValue = (_true && false) || true
-
-    val listValue = list(1, 2, 3, 4, 5)
-
-    println(listValue)
-
-    val ifThenElse = _if_then_else(booleanValue)(intValue)(intValue + 14)
-
-    val function = (x: Int) => x + ifThenElse
-
-    val liftedFunction = liftFunction(function)
-
-    println(stringProxy(ifThenElse))
-    println(s"Result of the evaluation : ${evalProxy(ifThenElse)}")
-    println(function)
-    println(liftedFunction)
-
-
-    // TODO: I don't want to have to do that, why can't the compiler figure it out ?
-    val argument = 45.asInstanceOf[ExprTest.intTyp.ScalaT]
-    val evaluatedFunction = liftedFunction.eval()
-    println(argument)
-    println(evaluatedFunction)
-    println(s"Evaluation of lifted funciton : ${evaluatedFunction.apply(argument)}")
-
-
-
-
+    show(_1 + 2 + 3)
+    show(!(_true && false) || true)
+    show(list(1, 2, 3, 4, 5))
+    show(_if_then_else(true)(32)(14))
+    show((x: Int) => x + 42)
+    show(Lambda((x: Int) => x + 3).apply(45))
+    show(list(1, 2, 3, 4).foldr[Int](0)(_ + _))
+    show(list(1, 2, 3, 4).map(_ + 2))
+    show(list(1, 2, 3, 4).filter(_ == _1))
+    show(list(1, 2, 3, 4).filter(_ != _4))
   }
 }
 
