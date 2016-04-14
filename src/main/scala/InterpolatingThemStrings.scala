@@ -48,8 +48,9 @@ object InterpolatingThemStrings {
     def json(args: Any*): JSONObject = {
       val parts = sc.parts
       val values = args.map(_.toString)
-      val elems = (head(parts.head) -> values.head) +: ((parts.tail.init map center) zip values.tail)
-      JSONObject(elems)
+      val firstPair = head(parts.head) -> values.head
+      val rest = (parts.tail.init map center) zip values.tail
+      JSONObject(firstPair +: rest)
     }
   }
 
