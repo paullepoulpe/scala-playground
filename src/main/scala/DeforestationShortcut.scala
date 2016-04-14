@@ -20,7 +20,6 @@ trait Common {
     def apply(a: A): B
   }
 
-
   def fromFunction[A, B](f: A => B): A CanBe B = new CanBe[A, B] {
     def apply(x: A) = f(x)
   }
@@ -153,6 +152,10 @@ trait BetterInts extends BetterExpr with AbstractInt {
     def ==(other: Int): Boolean = BetterBoolean(IntEqual(e, other.e))
 
     def !=(other: Int): Boolean = BetterBoolean(IntNotEqual(e, other.e))
+
+    def ==(other: scala.Int): Boolean = BetterBoolean(IntEqual(e, intTyp.extract(other)))
+
+    def !=(other: scala.Int): Boolean = BetterBoolean(IntNotEqual(e, intTyp.extract(other)))
   }
 
   type Int = BetterInt
@@ -293,6 +296,10 @@ trait AbstractInt extends Common {
     def ==(other: Int): Boolean
 
     def !=(other: Int): Boolean
+
+    def ==(other: scala.Int): Boolean
+
+    def !=(other: scala.Int): Boolean
   }
 
   type Int <: IntProxy
@@ -326,6 +333,10 @@ trait EvaluationInt extends CommonEval with AbstractInt {
     def ==(other: Int): Boolean = i == other.i
 
     def !=(other: Int): Boolean = i != other.i
+
+    def ==(other: scala.Int): Boolean = i == other
+
+    def !=(other: scala.Int): Boolean = i != other
 
     override def toString = i.toString
 
@@ -780,6 +791,12 @@ object ExprTest extends Runner with BetterExpr
     show(list(1, 2, 3, 4).map(_ + 2))
     show(list(1, 2, 3, 4).filter(_ == _1))
     show(list(1, 2, 3, 4).filter(_ != _4))
+    show(list(1, 2, 3, 4).sum)
+    show(list(1, 2, 3, 4).elem(3))
+    show(list(1, 2, 3, 4).foldr(_false)(_ == 3 || _))
+    show(list(true, false, true).and)
+    show(list(1, 2, 3) ++ list(4, 5, 6))
+
   }
 }
 
