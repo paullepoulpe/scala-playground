@@ -11,6 +11,10 @@ lazy val scalaReflect = Def.setting {
   "org.scala-lang" % "scala-reflect" % scalaVersion.value
 }
 
+lazy val scalaCompiler = Def.setting {
+  "org.scala-lang" % "scala-compiler" % "2.11.8"
+}
+
 lazy val core = (project in file(".")).
   dependsOn(macros).
   settings(commonSettings: _*).
@@ -22,7 +26,8 @@ lazy val macros = (project in file("macros")).
   settings(commonSettings: _*).
   settings(
     name := "macro-playground",
-    libraryDependencies += scalaReflect.value
+    libraryDependencies += scalaReflect.value,
+    libraryDependencies += scalaCompiler.value
   )
 
 
